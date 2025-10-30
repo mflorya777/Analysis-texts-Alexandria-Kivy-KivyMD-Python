@@ -28,6 +28,7 @@ from kivymd.uix.textfield import MDTextField
 from functools import partial
 import logging
 import re
+import os
 
 from threading import Thread
 from kivy.clock import Clock
@@ -51,6 +52,7 @@ class DataLexApp(MDApp):
         self.current_fragment_to_remove = None
         self.dialog = None
         self.current_text_index = None  # Индекс выбранного текста из self.texts
+        self.current_selected_button = None  # Текущая выбранная кнопка для визуального выделения
 
         # Настройка логгера
         self.logger = logging.getLogger(__name__)
@@ -69,6 +71,27 @@ class DataLexApp(MDApp):
 
         self.base_dict_words = []  # Список для слов базового словаря
         self.trash_words = []  # Список для слов корзины
+
+    def shorten_filename(self, filename, max_length=15):
+        """
+        Сокращает длинное имя файла.
+        Например: 'Экология.txt' остаётся как есть, 'ДлинноеИмяФайла.txt' -> 'Дли...txt'
+        """
+        if len(filename) <= max_length:
+            return filename
+        
+        # Разделяем имя и расширение
+        name, ext = os.path.splitext(filename)
+        
+        # Вычисляем доступное количество символов для имени
+        available = max_length - len(ext) - 3  # 3 для "..."
+        
+        if available < 1:
+            # Если расширение слишком длинное, просто обрезаем
+            return filename[:max_length-3] + "..."
+        
+        # Берём начало имени и добавляем расширение
+        return name[:available] + "..." + ext
 
     def build(self):
         self.texts = []
@@ -890,14 +913,15 @@ class DataLexApp(MDApp):
 
             # Создание и привязка кнопки с числовой нумерацией
             button = Button(text=str(idx), size_hint_y=None, height=20)
-            button.bind(on_press=lambda btn, idx=idx: self.on_fragment_button_press(idx, fragmented_texts))
+            button.background_color = (1, 1, 1, 1)  # Белый цвет по умолчанию
+            button.bind(on_release=lambda btn, idx=idx, texts=fragmented_texts: self.on_fragment_button_press(idx, texts, btn))
             scroll_content.add_widget(BorderedCell(button))
 
             # Создание и добавление метки с фрагментом
-            scroll_content.add_widget(BorderedCell(Label(text='txt', size_hint_y=None, height=20)))
+            scroll_content.add_widget(BorderedCell(Label(text='txt', size_hint_y=None, height=20, font_size="10sp")))
 
             # Добавление метки с количеством слов
-            scroll_content.add_widget(BorderedCell(Label(text=str(word_count), size_hint_y=None, height=20)))
+            scroll_content.add_widget(BorderedCell(Label(text=str(word_count), size_hint_y=None, height=20, font_size="10sp")))
 
             # Создание чекбокса с уникальным идентификатором для фрагмента
             check_box = CheckBox(size_hint_y=None, height=20)
@@ -910,10 +934,19 @@ class DataLexApp(MDApp):
         scroll_view.add_widget(scroll_content)
         self.table_layout.add_widget(scroll_view)
 
-    def on_fragment_button_press(self, idx, fragmented_texts):
+    def on_fragment_button_press(self, idx, fragmented_texts, instance=None):
         """
         Обработчик нажатия на кнопку фрагмента. Обновляет текстовое поле.
         """
+        # Сбрасываем выделение предыдущей кнопки
+        if self.current_selected_button:
+            self.current_selected_button.background_color = (1, 1, 1, 1)
+        
+        # Выделяем новую кнопку
+        if instance:
+            instance.background_color = (0.3, 0.7, 1, 1)  # Светло-голубой цвет
+            self.current_selected_button = instance
+        
         # Получаем текст фрагмента по индексу и обновляем текстовую область
         selected_text = fragmented_texts[idx - 1]  # Индексация начинается с 1
         self.text_area.text = selected_text  # Устанавливаем текст непосредственно в поле
@@ -955,6 +988,8 @@ class DataLexApp(MDApp):
         if popup:  # Проверка на None перед вызовом dismiss
             popup.dismiss()  # Закрываем попап
         self.texts = []  # Сброс списка текстов
+        self.current_text_index = None  # Сброс выбранного элемента
+        self.current_selected_button = None  # Сброс выбранной кнопки
         self.table_layout.clear_widgets()  # Очищаем таблицу
 
         # Создание ScrollView для таблицы
@@ -987,15 +1022,13 @@ class DataLexApp(MDApp):
 
                     words_count = len(text.split())
 
-                    # Генерация короткого имени файла для отображения
-                    file_name = file_path.split("/")[-1]  # Получаем только имя файла
-                    if len(file_name) > 10:
-                        fragment = f"{file_name[:4]}..{file_name[-4:]}"  # Сокращённое название
-                    else:
-                        fragment = file_name  # Если имя короткое, используем его целиком
+                    # Генерация имени файла для отображения
+                    fragment = os.path.basename(file_path)  # Получаем только имя файла без пути
+                    fragment = self.shorten_filename(fragment)  # Сокращаем длинное имя
 
                     # Используем partial для передачи правильного индекса в on_release
                     button = Button(text=str(i), size_hint_y=None, height=20)
+                    button.background_color = (1, 1, 1, 1)  # Белый цвет по умолчанию
                     button.bind(on_release=partial(self.display_text, i - 1))  # Передаем индекс
 
                     # Чекбокс для выбора
@@ -1004,8 +1037,8 @@ class DataLexApp(MDApp):
 
                     # Добавляем элементы в таблицу
                     scroll_content.add_widget(BorderedCell(button))
-                    scroll_content.add_widget(BorderedCell(Label(text=fragment, size_hint_y=None, height=20)))
-                    scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20)))
+                    scroll_content.add_widget(BorderedCell(Label(text=fragment, size_hint_y=None, height=20, font_size="10sp")))
+                    scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20, font_size="10sp")))
                     scroll_content.add_widget(BorderedCell(checkbox))
 
             except Exception as e:
@@ -1037,22 +1070,26 @@ class DataLexApp(MDApp):
 
         for i, (file_path, text) in enumerate(self.texts, start=1):
             words_count = len(text.split())
-            # Отображаем короткое имя: базовое имя файла + возможный суффикс после '#'
-            base_name = file_path.split("/")[-1]
-            if len(base_name) > 10:
-                display_name = f"{base_name[:4]}..{base_name[-4:]}"
-            else:
-                display_name = base_name
+            # Отображаем имя файла без пути
+            display_name = os.path.basename(file_path)
+            display_name = self.shorten_filename(display_name)  # Сокращаем длинное имя
 
             button = Button(text=str(i), size_hint_y=None, height=20)
             button.bind(on_release=partial(self.display_text, i - 1))
+            
+            # Если это текущая выбранная строка, выделяем кнопку
+            if self.current_text_index == i - 1:
+                button.background_color = (0.3, 0.7, 1, 1)  # Светло-голубой цвет
+                self.current_selected_button = button
+            else:
+                button.background_color = (1, 1, 1, 1)  # Белый по умолчанию
 
             checkbox = CheckBox(size_hint_y=None, height=20)
             checkbox.fragment_id = file_path
 
             scroll_content.add_widget(BorderedCell(button))
-            scroll_content.add_widget(BorderedCell(Label(text=display_name, size_hint_y=None, height=20)))
-            scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20)))
+            scroll_content.add_widget(BorderedCell(Label(text=display_name, size_hint_y=None, height=20, font_size="10sp")))
+            scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20, font_size="10sp")))
             scroll_content.add_widget(BorderedCell(checkbox))
 
         scroll_view.add_widget(scroll_content)
@@ -1062,6 +1099,15 @@ class DataLexApp(MDApp):
         """
         Отображает текст выбранного файла.
         """
+        # Сбрасываем выделение предыдущей кнопки
+        if self.current_selected_button:
+            self.current_selected_button.background_color = (1, 1, 1, 1)
+        
+        # Выделяем новую кнопку
+        if instance:
+            instance.background_color = (0.3, 0.7, 1, 1)  # Светло-голубой цвет
+            self.current_selected_button = instance
+        
         file_path, text = self.texts[index]
         # Отображение текста в правом окне
         self.text_area.text = f"{text}"
@@ -1245,15 +1291,13 @@ class DataLexApp(MDApp):
         for i, (fragment_id, fragment) in enumerate(self.fragments.items()):
             words_count = len(fragment.split())
 
-            # Короткое имя файла для отображения
-            file_name = fragment_id.split("/")[-1]
-            if len(file_name) > 10:
-                display_name = f"{file_name[:4]}..{file_name[-4:]}"
-            else:
-                display_name = file_name
+            # Имя файла для отображения без пути
+            display_name = os.path.basename(fragment_id)
+            display_name = self.shorten_filename(display_name)  # Сокращаем длинное имя
 
             # Кнопка с индексом
             button = Button(text=str(i), size_hint_y=None, height=20)
+            button.background_color = (1, 1, 1, 1)  # Белый цвет по умолчанию
             button.bind(on_release=partial(self.display_text, i))
 
             # Чекбокс для выбора
@@ -1262,8 +1306,8 @@ class DataLexApp(MDApp):
 
             # Добавляем виджеты в таблицу
             scroll_content.add_widget(BorderedCell(button))
-            scroll_content.add_widget(BorderedCell(Label(text=display_name, size_hint_y=None, height=20)))
-            scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20)))
+            scroll_content.add_widget(BorderedCell(Label(text=display_name, size_hint_y=None, height=20, font_size="10sp")))
+            scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20, font_size="10sp")))
             scroll_content.add_widget(BorderedCell(checkbox))
 
         # Добавляем таблицу в ScrollView
