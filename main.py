@@ -50,6 +50,7 @@ class DataLexApp(MDApp):
         self.original_text = ""  # Переменная для хранения исходного текста
         self.current_fragment_to_remove = None
         self.dialog = None
+        self.current_text_index = None  # Индекс выбранного текста из self.texts
 
         # Настройка логгера
         self.logger = logging.getLogger(__name__)
@@ -870,9 +871,8 @@ class DataLexApp(MDApp):
         Обновляет таблицу и текстовую область с новыми фрагментами.
         Структурирует таблицу с заголовками "##", "Фрагмент", "Слов", "Выбрать".
         """
-        # Очищаем таблицу и текстовую область
-        self.table_layout.clear_widgets()  # Очищаем все виджеты в таблице
-        self.text_area.clear_widgets()  # Очищаем текстовую область
+        # Очищаем только таблицу; text_area — это TextInput, у него нет детей
+        self.table_layout.clear_widgets()
 
         # Создание ScrollView для таблицы
         scroll_view = ScrollView(size_hint=(1, 1))  # ScrollView на всю ширину и высоту
@@ -904,8 +904,7 @@ class DataLexApp(MDApp):
             check_box.fragment_id = idx  # Привязываем индекс фрагмента как уникальный идентификатор
             scroll_content.add_widget(BorderedCell(check_box))
 
-            # Создание метки для текстовой области
-            self.text_area.add_widget(Label(text=text))
+            # Обновление правого окна не выполняем здесь; оно управляется выбором строки
 
         # Добавляем таблицу в ScrollView
         scroll_view.add_widget(scroll_content)
@@ -918,6 +917,7 @@ class DataLexApp(MDApp):
         # Получаем текст фрагмента по индексу и обновляем текстовую область
         selected_text = fragmented_texts[idx - 1]  # Индексация начинается с 1
         self.text_area.text = selected_text  # Устанавливаем текст непосредственно в поле
+        # Индекс в self.texts здесь не трогаем, этот метод работает с временным списком
 
     def cancel_dialog(self, *args):
         # Отмена диалога
@@ -1023,6 +1023,41 @@ class DataLexApp(MDApp):
         # Логируем состояние словаря self.texts после загрузки
         self.logger.debug(f"Состояние self.texts после загрузки: {self.texts}")
 
+    def render_table_from_texts(self):
+        """Полностью перерисовывает таблицу на основе текущего self.texts без чтения файлов заново."""
+        self.table_layout.clear_widgets()
+
+        scroll_view = ScrollView(size_hint=(1, 1))
+        scroll_content = GridLayout(cols=4, size_hint_y=None)
+        scroll_content.bind(minimum_height=scroll_content.setter('height'))
+
+        headers = ["##", "Фрагмент", "Слов", "Выбрать"]
+        for header in headers:
+            scroll_content.add_widget(BorderedCell(Label(text=header, size_hint_y=None, height=20, font_size="12sp")))
+
+        for i, (file_path, text) in enumerate(self.texts, start=1):
+            words_count = len(text.split())
+            # Отображаем короткое имя: базовое имя файла + возможный суффикс после '#'
+            base_name = file_path.split("/")[-1]
+            if len(base_name) > 10:
+                display_name = f"{base_name[:4]}..{base_name[-4:]}"
+            else:
+                display_name = base_name
+
+            button = Button(text=str(i), size_hint_y=None, height=20)
+            button.bind(on_release=partial(self.display_text, i - 1))
+
+            checkbox = CheckBox(size_hint_y=None, height=20)
+            checkbox.fragment_id = file_path
+
+            scroll_content.add_widget(BorderedCell(button))
+            scroll_content.add_widget(BorderedCell(Label(text=display_name, size_hint_y=None, height=20)))
+            scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20)))
+            scroll_content.add_widget(BorderedCell(checkbox))
+
+        scroll_view.add_widget(scroll_content)
+        self.table_layout.add_widget(scroll_view)
+
     def display_text(self, index, instance=None):
         """
         Отображает текст выбранного файла.
@@ -1030,6 +1065,8 @@ class DataLexApp(MDApp):
         file_path, text = self.texts[index]
         # Отображение текста в правом окне
         self.text_area.text = f"{text}"
+        # Запоминаем, какой элемент выбран
+        self.current_text_index = index
 
     #############################################################################
 
@@ -1084,27 +1121,14 @@ class DataLexApp(MDApp):
             print("Text is empty, aborting split")
             return
 
-        # Проверяем, является ли это фрагментом или загруженным файлом
-        original_key = None
-        is_file = False
-        for key, fragment_text in self.fragments.items():
-            if fragment_text == text:
-                original_key = key
-                break
-
-        if original_key is None:
-            # Проверяем среди файлов
-            for file_name, file_text in self.files.items():  # `self.files` — это словарь с загруженными файлами
-                if file_text == text:
-                    original_key = file_name  # Устанавливаем как имя файла
-                    is_file = True
-                    break
-
-        if original_key is None:
-            # Генерируем новый ключ и добавляем текст
-            original_key = f"frag.{len(self.fragments) + 1}"
-            self.fragments[original_key] = text
-            print(f"Added original text to fragments with key: {original_key}")
+        # Определяем, какой элемент self.texts сейчас выбран
+        if self.current_text_index is None or self.current_text_index >= len(self.texts):
+            # Попытка найти по содержимому в self.texts
+            try:
+                self.current_text_index = next(i for i, (_, t) in enumerate(self.texts) if t == text)
+            except StopIteration:
+                print("Не удалось определить выбранный элемент для разделения")
+                return
 
         # Разделение текста
         first_part = text[:cursor_position].strip()
@@ -1117,90 +1141,47 @@ class DataLexApp(MDApp):
             print("One of the parts is empty, aborting split")
             return
 
-        # Обновление для фрагмента
-        if not is_file:
-            # Удаляем исходный фрагмент из словаря
-            del self.fragments[original_key]
+        # Формируем новые ключи на основе исходного пути
+        original_key = self.texts[self.current_text_index][0]
+        base_key = original_key.split('#')[0]
+        key1 = f"{base_key}#1"
+        key2 = f"{base_key}#2"
 
-            # Обновляем оригинальный ключ с первой частью
-            self.fragments[original_key] = first_part
+        # Обеспечим уникальность ключей в self.texts
+        existing_keys = {k for k, _ in self.texts}
+        if key1 in existing_keys or key2 in existing_keys:
+            suffix = 1
+            while True:
+                key1_try = f"{base_key}#part{suffix}.1"
+                key2_try = f"{base_key}#part{suffix}.2"
+                if key1_try not in existing_keys and key2_try not in existing_keys:
+                    key1, key2 = key1_try, key2_try
+                    break
+                suffix += 1
 
-            # Создаем ключ для новой части
-            new_key = f"{original_key}.1"
-
-            # Добавляем новую часть
-            new_fragments = {
-                new_key: second_part,
-            }
-            self.fragments.update(new_fragments)
-        else:
-            # Для файлов: обновляем содержимое файла
-            self.files[original_key] = first_part
-            new_key = f"{original_key}.1"
-            self.files[new_key] = second_part
+        # Обновляем self.texts: заменяем один элемент на два
+        new_texts = []
+        for i, (k, t) in enumerate(self.texts):
+            if i == self.current_text_index:
+                new_texts.append((key1, first_part))
+                new_texts.append((key2, second_part))
+            else:
+                new_texts.append((k, t))
+        self.texts = new_texts
 
         # Обновляем текст в text_area (оставляем первую часть)
         self.text_area.text = first_part
 
-        print("Updated fragments/files:", self.fragments, self.files)
-
-        # Обновляем таблицу: удаляем оригинальный элемент и добавляем обе части
-        if is_file:
-            self.update_table(removed_key=original_key, new_fragments={original_key: first_part, new_key: second_part})
-        else:
-            self.update_table(removed_key=original_key, new_fragments={original_key: first_part, new_key: second_part})
+        # Перерисовываем таблицу из текущего состояния self.texts
+        self.render_table_from_texts()
 
     def update_table(self, removed_key=None, new_fragments=None):
         """
         Обновляет таблицу: удаляет строку с `removed_key` и добавляет строки из `new_fragments`.
         """
-        print("Updating table...")
-        print(f"Removed key: {removed_key}")
-        print(f"New fragments: {new_fragments}")
-
-        if removed_key:
-            # Удаляем строку, связанную с removed_key
-            widgets_to_remove = []
-            for i, child in enumerate(self.table_layout.children[:]):
-                widget_text = getattr(child, 'text', '').strip()
-                if widget_text == removed_key.strip():
-                    # Удаляем строку (4 виджета: кнопка, ключ, счетчик слов, чекбокс)
-                    widgets_to_remove.extend(self.table_layout.children[i:i + 4])
-                    break
-
-            if widgets_to_remove:
-                for widget in widgets_to_remove:
-                    print(f"Removing widget: {widget} | Text: {getattr(widget, 'text', 'No text')}")
-                    self.table_layout.remove_widget(widget)
-            else:
-                print(f"Key {removed_key} not found in table_layout!")
-
-        if new_fragments:
-            # Добавляем новые строки для фрагментов или файлов
-            for key, fragment_text in new_fragments.items():
-                word_count = len(fragment_text.split())
-
-                # Проверяем, это фрагмент или файл
-                if key.startswith("frag"):
-                    # Это фрагмент текста
-                    button = Button(text=str(len(self.fragments)), size_hint_y=None, height=20)
-                    button.bind(
-                        on_press=lambda instance, text=fragment_text, key=key: self.view_fragment(text, instance, key)
-                    )
-                else:
-                    # Это файл
-                    button = Button(text=key, size_hint_y=None, height=20)
-                    button.bind(
-                        on_press=lambda instance, text=fragment_text, key=key: self.view_fragment(text, instance, key)
-                    )
-
-                # Добавляем новые виджеты в таблицу
-                self.table_layout.add_widget(button)
-                self.table_layout.add_widget(Label(text=key, size_hint_y=None, height=20))
-                self.table_layout.add_widget(Label(text=str(word_count), size_hint_y=None, height=20))
-                self.table_layout.add_widget(CheckBox(size_hint_y=None, height=20))
-
-                print(f"Added fragment/file: {key} with word count {word_count}")
+        # Эта функция больше не используется для построчных манипуляций.
+        # Для一致ности интерфейса теперь вся таблица перерисовывается из self.texts.
+        self.render_table_from_texts()
 
     def view_fragment(self, fragment_text, instance=None, fragment_key=None):
         """
@@ -1224,36 +1205,27 @@ class DataLexApp(MDApp):
         """
         Удаляет фрагменты с выделенными чекбоксами.
         """
-        # Получаем список всех чекбоксов в таблице
-        checkboxes = [widget for widget in self.table_layout.walk() if isinstance(widget, CheckBox)]
+        # Собираем отмеченные идентификаторы
+        selected_ids = []
+        for widget in self.table_layout.walk():
+            if isinstance(widget, CheckBox) and getattr(widget, 'active', False):
+                frag_id = getattr(widget, 'fragment_id', None)
+                if frag_id is not None:
+                    selected_ids.append(frag_id)
 
-        # Перебираем все чекбоксы и проверяем, если они отмечены
-        for checkbox in checkboxes:
-            if checkbox.active:  # Если чекбокс выбран
-                file_path = checkbox.fragment_id  # Получаем уникальный идентификатор файла (путь)
+        if not selected_ids:
+            return
 
-                # Удаляем фрагмент из списка self.texts
-                self.texts = [text for text in self.texts if text[0] != file_path]
+        # Фильтруем self.texts
+        self.texts = [(k, t) for (k, t) in self.texts if k not in set(selected_ids)]
 
-                # Удаляем строку с таблицы (кнопки и чекбокс, связанные с фрагментом)
-                for widget in self.table_layout.children:
-                    if isinstance(widget, GridLayout):
-                        for child in widget.children:
-                            if isinstance(child, CheckBox) and child.fragment_id == file_path:
-                                widget.remove_widget(child)
-                            elif isinstance(child, Button) and child.text == str(self.texts.index((file_path, _)) + 1):
-                                widget.remove_widget(child)
-                            elif isinstance(child, Label) and (
-                                    child.text == file_path.split("/")[-1] or child.text == str(
-                                    len(file_path.split()))):
-                                widget.remove_widget(child)
+        # Сброс текущего индекса, если он указывает на удалённый элемент
+        if self.current_text_index is not None:
+            if self.current_text_index >= len(self.texts):
+                self.current_text_index = None
 
-                # Логируем удаление фрагмента
-                self.logger.info(f"Фрагмент {file_path} удален.")
-
-        # Обновляем интерфейс (можно добавить очистку и перерисовку элементов)
-        self.table_layout.clear_widgets()
-        self.load_files([file[0] for file in self.texts], popup=None)  # Перезагружаем таблицу без удалённых файлов
+        # Перерисовываем таблицу
+        self.render_table_from_texts()
 
     def update_table_after_deletion(self):
         """Обновляет отображение таблицы после удаления фрагментов."""
