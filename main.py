@@ -1121,39 +1121,19 @@ class DataLexApp(MDApp):
         """
         Отмечает все чекбоксы в таблице.
         """
-        # Перебираем элементы в table_layout
-        for child in self.table_layout.children:
-            # Если это ScrollView, ищем GridLayout внутри него
-            if isinstance(child, ScrollView):
-                for scroll_content_child in child.children:
-                    if isinstance(scroll_content_child, GridLayout):  # Находим GridLayout внутри ScrollView
-                        for checkbox in scroll_content_child.children:
-                            if isinstance(checkbox, CheckBox):
-                                checkbox.active = True  # Отмечаем чекбокс
-            # Если это GridLayout, перебираем его чекбоксы
-            elif isinstance(child, GridLayout):
-                for checkbox in child.children:
-                    if isinstance(checkbox, CheckBox):
-                        checkbox.active = True  # Отмечаем чекбокс
+        # Используем walk() для обхода всех виджетов в дереве
+        for widget in self.table_layout.walk():
+            if isinstance(widget, CheckBox):
+                widget.active = True  # Отмечаем чекбокс
 
     def disable_all_checkboxes(self, instance):
         """
         Убирает отметки всех чекбоксов в таблице.
         """
-        # Перебираем элементы в table_layout
-        for child in self.table_layout.children:
-            # Если это ScrollView, ищем GridLayout внутри него
-            if isinstance(child, ScrollView):
-                for scroll_content_child in child.children:
-                    if isinstance(scroll_content_child, GridLayout):  # Находим GridLayout внутри ScrollView
-                        for checkbox in scroll_content_child.children:
-                            if isinstance(checkbox, CheckBox):
-                                checkbox.active = False  # Снимаем отметку с чекбокса
-            # Если это GridLayout, перебираем его чекбоксы
-            elif isinstance(child, GridLayout):
-                for checkbox in child.children:
-                    if isinstance(checkbox, CheckBox):
-                        checkbox.active = False  # Снимаем отметку с чекбокса
+        # Используем walk() для обхода всех виджетов в дереве
+        for widget in self.table_layout.walk():
+            if isinstance(widget, CheckBox):
+                widget.active = False  # Снимаем отметку с чекбокса
 
     #############################################################################
 
