@@ -661,8 +661,19 @@ class DataLexApp(MDApp):
             self.dialog.dismiss()
             self.dialog = None
 
-        def on_checkbox_active(instance, value):
-            print(f"{instance.id} активирован" if value else f"{instance.id} деактивирован")
+        def on_checkbox_size_active(instance, value):
+            """Обработчик для чекбокса 'Разбить по размеру'"""
+            print(f"checkbox_size {'активирован' if value else 'деактивирован'}")
+            if value and self.checkbox_row.active:
+                # Если активируем этот чекбокс, деактивируем другой
+                self.checkbox_row.active = False
+        
+        def on_checkbox_row_active(instance, value):
+            """Обработчик для чекбокса 'Разбить по строке'"""
+            print(f"checkbox_row {'активирован' if value else 'деактивирован'}")
+            if value and self.checkbox_size.active:
+                # Если активируем этот чекбокс, деактивируем другой
+                self.checkbox_size.active = False
 
         # Сохранение ссылок на чекбоксы
         self.checkbox_size = MDCheckbox(
@@ -671,7 +682,7 @@ class DataLexApp(MDApp):
             pos_hint={"center_y": 0.5},
         )
         self.checkbox_size.id = "checkbox_size"
-        self.checkbox_size.bind(active=on_checkbox_active)
+        self.checkbox_size.bind(active=on_checkbox_size_active)
 
         self.checkbox_row = MDCheckbox(
             size_hint=(None, None),
@@ -679,7 +690,7 @@ class DataLexApp(MDApp):
             pos_hint={"center_y": 0.5},
         )
         self.checkbox_row.id = "checkbox_row"
-        self.checkbox_row.bind(active=on_checkbox_active)
+        self.checkbox_row.bind(active=on_checkbox_row_active)
 
         # Создаем интерфейс диалога вручную
         content = BoxLayout(
@@ -763,17 +774,26 @@ class DataLexApp(MDApp):
         # Проверка чекбоксов
         size_split = self.checkbox_size.active
         row_split = self.checkbox_row.active
-
-        # Проверка значений в полях ввода
-        target = self.target_input.text
-        tolerance = self.tolerance_input.text
-
-        if not target.isdigit() or not tolerance.isdigit():
-            print("Некорректные значения в полях ввода")
+        
+        # Проверяем, что выбран хотя бы один режим
+        if not size_split and not row_split:
+            print("Не выбран режим разбиения")
             return
 
-        target = int(target)
-        tolerance = int(tolerance)
+        # Проверка значений в полях ввода только для режима "Разбить по размеру"
+        target = 0
+        tolerance = 0
+        
+        if size_split:
+            target_text = self.target_input.text
+            tolerance_text = self.tolerance_input.text
+            
+            if not target_text.isdigit() or not tolerance_text.isdigit():
+                print("Некорректные значения в полях ввода для режима 'Разбить по размеру'")
+                return
+            
+            target = int(target_text)
+            tolerance = int(tolerance_text)
 
         # Получаем текст из text_area или из загруженных файлов
         selected_texts, selected_ids = self.get_text_from_area_or_fragments()
@@ -873,16 +893,19 @@ class DataLexApp(MDApp):
         from itertools import chain
 
         fragmented_data = []
-        if size_split:
+        if size_split and not row_split:
+            # Разбиение по размеру с учетом законченных предложений
             # Возвращает список кортежей (text, is_successful, word_count)
             fragmented_data = self.process_large_texts(selected_texts, target, tolerance)
         elif row_split:
-            # Для разбиения по строкам просто разделяем
+            # Для разбиения по строкам просто разделяем каждый выбранный текст
+            # Приоритет отдаем разбиению по строкам, если оба режима активны
             for text in selected_texts:
                 for line in text.splitlines():
-                    if line.strip():
+                    if line.strip():  # Игнорируем пустые строки
                         word_count = len(line.split())
-                        fragmented_data.append((line, True, word_count))
+                        # Все фрагменты помечаются как успешные при разбиении по строкам
+                        fragmented_data.append((line.strip(), True, word_count))
 
         # Переход обратно в основной поток для обновления интерфейса
         Clock.schedule_once(lambda dt: self._update_ui_after_fragmentation(fragmented_data, selected_ids))
