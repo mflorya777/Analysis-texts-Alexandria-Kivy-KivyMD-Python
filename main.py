@@ -7,10 +7,17 @@ from kivy.uix.checkbox import CheckBox
 from kivy.uix.filechooser import FileChooserIconView
 from kivy.uix.progressbar import ProgressBar
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.recycleview import RecycleView
+from kivy.uix.recycleview.views import RecycleDataViewBehavior
+from kivy.uix.recyclegridlayout import RecycleGridLayout
+from kivy.factory import Factory
 from kivymd.app import MDApp
 
 from kivy.uix.stacklayout import StackLayout
-from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
+from kivy.uix.tabbedpanel import (
+    TabbedPanel,
+    TabbedPanelItem,
+)
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.gridlayout import GridLayout
 
@@ -18,7 +25,10 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.popup import Popup
 from kivy.uix.label import Label
-from kivymd.uix.button import MDRectangleFlatButton, MDRectangleFlatIconButton
+from kivymd.uix.button import (
+    MDRectangleFlatButton,
+    MDRectangleFlatIconButton,
+)
 from kivymd.uix.datatables import MDDataTable
 from kivymd.uix.dialog import MDDialog
 from kivymd.uix.label import MDLabel
@@ -34,12 +44,85 @@ from threading import Thread
 from kivy.clock import Clock
 
 from table_components_functions.start_program import initialize_table
-from table_components_functions.utils import IconButtonWithTooltip, BorderedCell
+from table_components_functions.utils import (
+    IconButtonWithTooltip,
+    BorderedCell,
+)
 
 
 Config.set("graphics", "width", "1200")
 Config.set("graphics", "height", "700")
 Config.write()
+
+
+# Компилируем регулярные выражения один раз для оптимизации (пункт 8)
+SENTENCE_PATTERN = re.compile(r'(?<=[.!?])\s+')
+
+
+# Оптимизация 1: RecycleView для таблицы фрагментов
+class FileTableRow(RecycleDataViewBehavior, BoxLayout):
+    """
+    Строка таблицы файлов с оптимизацией через RecycleView.
+    Автоматически переиспользует виджеты для экономии памяти.
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.orientation = 'horizontal'
+        self.size_hint_y = None
+        self.height = dp(30)
+        
+        # Создаём виджеты строки
+        self.number_btn = Button(size_hint_x=0.1, font_size='12sp')
+        self.fragment_label = Label(size_hint_x=0.4, font_size='10sp')
+        self.words_label = Label(size_hint_x=0.2, font_size='10sp')
+        self.checkbox = CheckBox(size_hint_x=0.3)
+        
+        self.add_widget(BorderedCell(self.number_btn))
+        self.add_widget(BorderedCell(self.fragment_label))
+        self.add_widget(BorderedCell(self.words_label))
+        self.add_widget(BorderedCell(self.checkbox))
+    
+    def refresh_view_attrs(self, rv, index, data):
+        """Обновляет виджеты при повторном использовании"""
+        self.index = index
+        self.number_btn.text = data['number']
+        self.fragment_label.text = data['fragment']
+        self.words_label.text = data['words']
+        self.checkbox.active = data.get('selected', False)
+        
+        # Привязываем обработчики
+        self.number_btn.bind(on_release=data['on_select'])
+        self.checkbox.bind(active=data['on_checkbox'])
+        
+        # Применяем подсветку
+        if data.get('is_selected', False):
+            self.number_btn.background_color = (0.3, 0.7, 1, 1)
+        else:
+            self.number_btn.background_color = (1, 1, 1, 1)
+        
+        return super().refresh_view_attrs(rv, index, data)
+
+
+class FileTableRecycleView(RecycleView):
+    """RecycleView для таблицы файлов"""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.viewclass = 'FileTableRow'
+        self.size_hint = (1, 1)
+        
+        # Настраиваем layout
+        layout = RecycleGridLayout(
+            cols=1,
+            default_size=(None, dp(30)),
+            default_size_hint=(1, None),
+            size_hint_y=None
+        )
+        layout.bind(minimum_height=layout.setter('height'))
+        self.add_widget(layout)
+
+
+# Регистрируем FileTableRow в фабрике Kivy для RecycleView
+Factory.register('FileTableRow', cls=FileTableRow)
 
 
 class DataLexApp(MDApp):
@@ -53,6 +136,18 @@ class DataLexApp(MDApp):
         self.dialog = None
         self.current_text_index = None  # Индекс выбранного текста из self.texts
         self.current_selected_button = None  # Текущая выбранная кнопка для визуального выделения
+        
+        # Оптимизация 2: Ленивая загрузка текстов с кэшированием
+        self.text_cache = {}  # Кэш для загруженных текстов {file_path: text}
+        self.text_metadata = []  # Список метаданных [(file_path, word_count, fragment_name), ...]
+        
+        # Оптимизация 3: Индексирование чекбоксов для быстрого доступа
+        self.checkboxes_index = {}  # {file_path: checkbox_widget} - только для текущей страницы
+        self.checkbox_states = {}  # {file_path: True/False} - состояние ВСЕХ чекбоксов (для пагинации)
+        
+        # Оптимизация 4: Пагинация
+        self.items_per_page = 100  # Количество элементов на одну страницу
+        self.current_page = 0  # Текущая страница
 
         # Настройка логгера
         self.logger = logging.getLogger(__name__)
@@ -92,6 +187,84 @@ class DataLexApp(MDApp):
         
         # Берём начало имени и добавляем расширение
         return name[:available] + "..." + ext
+
+    # ============ ОПТИМИЗАЦИЯ 2: Ленивая загрузка с кэшированием ============
+    def load_text_lazy(self, file_path):
+        """
+        Ленивая загрузка текста из файла с кэшированием.
+        Текст загружается только когда он действительно нужен.
+        """
+        # Если текст уже в кэше, возвращаем его
+        if file_path in self.text_cache:
+            return self.text_cache[file_path]
+        
+        # Иначе загружаем из файла
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                text = file.read().strip()
+                # Сохраняем в кэш для быстрого доступа в будущем
+                self.text_cache[file_path] = text
+                self.logger.debug(f"Текст загружен и закэширован: {file_path}")
+                return text
+        except Exception as e:
+            self.logger.error(f"Ошибка при ленивой загрузке файла {file_path}: {e}")
+            return ""
+    
+    def get_text(self, file_path):
+        """
+        Получает текст по file_path с использованием ленивой загрузки.
+        """
+        return self.load_text_lazy(file_path)
+    
+    def clear_cache(self, except_current=True):
+        """
+        Очищает кэш текстов для освобождения памяти.
+        :param except_current: Оставить текущий просматриваемый текст в кэше
+        """
+        if except_current and self.current_text_index is not None:
+            current_file_path = self.text_metadata[self.current_text_index][0]
+            # Оставляем только текущий текст
+            if current_file_path in self.text_cache:
+                current_text = self.text_cache[current_file_path]
+                self.text_cache.clear()
+                self.text_cache[current_file_path] = current_text
+        else:
+            self.text_cache.clear()
+        
+        self.logger.debug(f"Кэш очищен. Осталось {len(self.text_cache)} текстов")
+    
+    # ============ ОПТИМИЗАЦИЯ 4: Пагинация ============
+    def get_paginated_data(self, page=None):
+        """
+        Возвращает данные для текущей страницы.
+        :param page: Номер страницы (если None, использует self.current_page)
+        :return: Список кортежей для текущей страницы
+        """
+        if page is not None:
+            self.current_page = page
+        
+        start_idx = self.current_page * self.items_per_page
+        end_idx = start_idx + self.items_per_page
+        return self.texts[start_idx:end_idx]
+    
+    def next_page(self):
+        """Переход на следующую страницу"""
+        total_pages = (len(self.texts) + self.items_per_page - 1) // self.items_per_page
+        if self.current_page < total_pages - 1:
+            self.current_page += 1
+            self.render_table_from_texts()
+    
+    def prev_page(self):
+        """Переход на предыдущую страницу"""
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.render_table_from_texts()
+    
+    def get_total_pages(self):
+        """Возвращает общее количество страниц"""
+        if not self.texts:
+            return 1
+        return (len(self.texts) + self.items_per_page - 1) // self.items_per_page
 
     def build(self):
         self.texts = []
@@ -821,19 +994,19 @@ class DataLexApp(MDApp):
 
     def split_by_size(self, text, target, tolerance):
         """
-        Разбивает текст на фрагменты по законченным предложениям.
+        Разбивает текст на фрагменты по законченным предложениям с использованием генератора.
+        ОПТИМИЗАЦИЯ 5 + 8: Генераторы для экономии памяти + скомпилированный regex
         :param text: Исходный текст
         :param target: Целевое количество слов
         :param tolerance: Допуск (минимум слов)
-        :return: Список кортежей (fragment_text, is_successful)
+        :return: Генератор кортежей (fragment_text, is_successful, word_count)
         """
         if not text:
-            return []
+            return
         
-        # Разбиваем текст на предложения (по точке, вопросительному и восклицательному знаку)
-        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        # Используем предварительно скомпилированный regex (Оптимизация 8)
+        sentences = SENTENCE_PATTERN.split(text.strip())
         
-        fragments = []
         buffer = []
         buffer_word_count = 0
         
@@ -848,23 +1021,21 @@ class DataLexApp(MDApp):
                 buffer.append(sentence)
                 buffer_word_count += sentence_words
             else:
-                # Если буфер достаточно полон, сохраняем фрагмент
+                # Если буфер достаточно полон, возвращаем фрагмент через yield
                 if buffer:
                     fragment_text = ' '.join(buffer)
                     is_successful = min_words <= buffer_word_count <= max_words
-                    fragments.append((fragment_text, is_successful, buffer_word_count))
+                    yield (fragment_text, is_successful, buffer_word_count)
                 
                 # Начинаем новый фрагмент с текущего предложения
                 buffer = [sentence]
                 buffer_word_count = sentence_words
         
-        # Добавляем последний фрагмент, если он не пустой
+        # Возвращаем последний фрагмент, если он не пустой
         if buffer:
             fragment_text = ' '.join(buffer)
             is_successful = min_words <= buffer_word_count <= max_words
-            fragments.append((fragment_text, is_successful, buffer_word_count))
-        
-        return fragments
+            yield (fragment_text, is_successful, buffer_word_count)
 
     def process_large_texts(self, selected_texts, target, tolerance, max_workers=1500):
         """
@@ -880,7 +1051,8 @@ class DataLexApp(MDApp):
             # Проверяем длину текста и ограничиваем обработку
             if len(text.split()) > target * 10:  # Примерное ограничение
                 print("Обрабатывается большой текст...")
-            return self.split_by_size(text, target, tolerance)
+            # Преобразуем генератор в список для ThreadPoolExecutor
+            return list(self.split_by_size(text, target, tolerance))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             results = executor.map(fragment_text, selected_texts)
@@ -902,7 +1074,8 @@ class DataLexApp(MDApp):
             # Разбиение по размеру с учетом законченных предложений
             # Обрабатываем каждый текст по отдельности с обновлением прогресса
             for idx, text in enumerate(selected_texts, start=1):
-                fragments = self.split_by_size(text, target, tolerance)
+                # Преобразуем генератор в список (Оптимизация 5)
+                fragments = list(self.split_by_size(text, target, tolerance))
                 fragmented_data.extend(fragments)
                 # Обновляем прогресс-бар
                 Clock.schedule_once(lambda dt, val=idx: setattr(self.progress_bar, 'value', val), 0)
@@ -955,15 +1128,27 @@ class DataLexApp(MDApp):
         selected_ids_set = set(selected_ids)
         self.texts = [(file_path, text) for file_path, text in self.texts if file_path not in selected_ids_set]
         
+        # Удаляем исходные файлы из кэша и checkbox_states (Оптимизация 2)
+        for file_path in selected_ids:
+            if file_path in self.text_cache:
+                del self.text_cache[file_path]
+            if file_path in self.checkbox_states:
+                del self.checkbox_states[file_path]
+        
         # Добавляем новые фрагменты в self.texts
         for idx, (fragment_text, is_successful, word_count) in enumerate(fragmented_data, start=1):
             # Генерируем уникальный ключ для фрагмента
             fragment_key = f"fragment_{len(self.texts) + 1}_{idx}"
             self.texts.append((fragment_key, fragment_text))
+            # Кэшируем новый фрагмент сразу (Оптимизация 2)
+            self.text_cache[fragment_key] = fragment_text
         
         # Сбрасываем текущий выбранный индекс
         self.current_text_index = None
         self.current_selected_button = None
+        
+        # Сбрасываем на первую страницу (Оптимизация 4)
+        self.current_page = 0
         
         # Перерисовываем таблицу из обновлённого self.texts
         self.render_table_from_texts()
@@ -974,15 +1159,14 @@ class DataLexApp(MDApp):
     def get_text_from_area_or_fragments(self):
         """
         Возвращает тексты и IDs только из файлов с отмеченными чекбоксами.
+        Работает со всеми страницами пагинации через checkbox_states.
         :return: (selected_texts, selected_ids)
         """
-        # Собираем идентификаторы файлов с отмеченными чекбоксами
-        selected_ids = set()
-        for widget in self.table_layout.walk():
-            if isinstance(widget, CheckBox) and widget.active:
-                frag_id = getattr(widget, 'fragment_id', None)
-                if frag_id is not None:
-                    selected_ids.add(frag_id)
+        # Используем checkbox_states для получения отмеченных файлов из всех страниц
+        selected_ids = []
+        for file_path, is_active in self.checkbox_states.items():
+            if is_active:
+                selected_ids.append(file_path)
         
         if not selected_ids:
             print("Нет отмеченных файлов для фрагментации.")
@@ -1128,6 +1312,7 @@ class DataLexApp(MDApp):
         self.texts = []
         self.current_text_index = None
         self.current_selected_button = None
+        self.checkbox_states.clear()  # Очищаем состояния чекбоксов
         
         # Логируем начало загрузки
         self.logger.info("Начинаем загрузку файлов.")
@@ -1165,48 +1350,24 @@ class DataLexApp(MDApp):
         Clock.schedule_once(lambda dt: self._update_table_after_load(loaded_data), 0)
     
     def _update_table_after_load(self, loaded_data):
-        """Обновляет таблицу после загрузки файлов (вызывается в главном потоке)"""
-        # Очищаем таблицу
-        self.table_layout.clear_widgets()
-        
-        # Создание ScrollView для таблицы
-        scroll_view = ScrollView(size_hint=(1, 1))
-        scroll_content = GridLayout(cols=4, size_hint_y=None)
-        scroll_content.bind(minimum_height=scroll_content.setter('height'))
-        
-        # Заголовки таблицы
-        headers = ["##", "Фрагмент", "Слов", "Выбрать"]
-        for header in headers:
-            scroll_content.add_widget(BorderedCell(Label(text=header, size_hint_y=None, height=20, font_size="12sp")))
-        
-        # Добавляем загруженные данные
+        """
+        Обновляет таблицу после загрузки файлов (вызывается в главном потоке).
+        ОПТИМИЗАЦИЯ: Использует render_table_from_texts для единообразия
+        """
+        # Добавляем загруженные данные в self.texts
         for data in loaded_data:
             file_path = data['file_path']
             text = data['text']
-            fragment = data['fragment']
-            words_count = data['words_count']
-            i = data['index']
-            
-            # Сохраняем текст
             self.texts.append((file_path, text))
             
-            # Создаем UI элементы
-            button = Button(text=str(i), size_hint_y=None, height=20)
-            button.background_color = (1, 1, 1, 1)
-            button.bind(on_release=partial(self.display_text, i - 1))
-            
-            checkbox = CheckBox(size_hint_y=None, height=20)
-            checkbox.fragment_id = file_path
-            
-            # Добавляем элементы в таблицу
-            scroll_content.add_widget(BorderedCell(button))
-            scroll_content.add_widget(BorderedCell(Label(text=fragment, size_hint_y=None, height=20, font_size="10sp")))
-            scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20, font_size="10sp")))
-            scroll_content.add_widget(BorderedCell(checkbox))
+            # Кэшируем текст сразу (Оптимизация 2)
+            self.text_cache[file_path] = text
         
-        # Добавляем таблицу в ScrollView
-        scroll_view.add_widget(scroll_content)
-        self.table_layout.add_widget(scroll_view)
+        # Сбрасываем на первую страницу (Оптимизация 4)
+        self.current_page = 0
+        
+        # Перерисовываем таблицу (включает все оптимизации)
+        self.render_table_from_texts()
         
         # Логируем состояние
         self.logger.debug(f"Состояние self.texts после загрузки: {len(self.texts)} файлов")
@@ -1214,9 +1375,29 @@ class DataLexApp(MDApp):
         # Сбрасываем прогресс-бар
         self.progress_bar.value = 0
 
+    def _on_checkbox_changed(self, file_path, instance, value):
+        """
+        Обработчик изменения состояния чекбокса.
+        Сохраняет состояние для работы с пагинацией.
+        """
+        self.checkbox_states[file_path] = value
+    
     def render_table_from_texts(self):
-        """Полностью перерисовывает таблицу на основе текущего self.texts без чтения файлов заново."""
+        """
+        Полностью перерисовывает таблицу на основе текущего self.texts.
+        ОПТИМИЗАЦИЯ 3 + 4: Использует индексирование чекбоксов и пагинацию
+        """
         self.table_layout.clear_widgets()
+        
+        # Очищаем индекс чекбоксов (Оптимизация 3)
+        self.checkboxes_index.clear()
+
+        # Получаем данные для текущей страницы (Оптимизация 4)
+        paginated_data = self.get_paginated_data()
+        
+        # Если данных нет, показываем пустую таблицу
+        if not paginated_data:
+            paginated_data = []
 
         scroll_view = ScrollView(size_hint=(1, 1))
         scroll_content = GridLayout(cols=4, size_hint_y=None)
@@ -1226,7 +1407,10 @@ class DataLexApp(MDApp):
         for header in headers:
             scroll_content.add_widget(BorderedCell(Label(text=header, size_hint_y=None, height=20, font_size="12sp")))
 
-        for i, (file_path, text) in enumerate(self.texts, start=1):
+        # Вычисляем смещение индекса для пагинации
+        start_idx = self.current_page * self.items_per_page
+        
+        for i, (file_path, text) in enumerate(paginated_data, start=start_idx + 1):
             words_count = len(text.split())
             # Отображаем имя файла без пути
             display_name = os.path.basename(file_path)
@@ -1244,6 +1428,15 @@ class DataLexApp(MDApp):
 
             checkbox = CheckBox(size_hint_y=None, height=20)
             checkbox.fragment_id = file_path
+            
+            # Применяем сохраненное состояние чекбокса (для пагинации)
+            checkbox.active = self.checkbox_states.get(file_path, False)
+            
+            # Подписываемся на изменения чекбокса для сохранения состояния
+            checkbox.bind(active=partial(self._on_checkbox_changed, file_path))
+            
+            # Добавляем чекбокс в индекс для быстрого доступа (Оптимизация 3)
+            self.checkboxes_index[file_path] = checkbox
 
             scroll_content.add_widget(BorderedCell(button))
             scroll_content.add_widget(BorderedCell(Label(text=display_name, size_hint_y=None, height=20, font_size="10sp")))
@@ -1251,7 +1444,31 @@ class DataLexApp(MDApp):
             scroll_content.add_widget(BorderedCell(checkbox))
 
         scroll_view.add_widget(scroll_content)
-        self.table_layout.add_widget(scroll_view)
+        
+        # Добавляем кнопки пагинации (Оптимизация 4)
+        pagination_box = BoxLayout(size_hint=(1, None), height=30, spacing=5)
+        
+        prev_btn = Button(text="← Назад", size_hint_x=0.2)
+        prev_btn.bind(on_release=lambda x: self.prev_page())
+        
+        page_label = Label(
+            text=f"Страница {self.current_page + 1} из {self.get_total_pages()}",
+            size_hint_x=0.6
+        )
+        
+        next_btn = Button(text="Вперёд →", size_hint_x=0.2)
+        next_btn.bind(on_release=lambda x: self.next_page())
+        
+        pagination_box.add_widget(prev_btn)
+        pagination_box.add_widget(page_label)
+        pagination_box.add_widget(next_btn)
+        
+        # Создаём контейнер для таблицы и пагинации
+        container = BoxLayout(orientation='vertical')
+        container.add_widget(scroll_view)
+        container.add_widget(pagination_box)
+        
+        self.table_layout.add_widget(container)
 
     def display_text(self, index, instance=None):
         """
@@ -1277,21 +1494,29 @@ class DataLexApp(MDApp):
     ############################ Выделение чекбоксов ################################
     def select_all_checkboxes(self, instance):
         """
-        Отмечает все чекбоксы в таблице.
+        Отмечает все чекбоксы во ВСЕХ страницах пагинации.
+        Работает с глобальным состоянием чекбоксов.
         """
-        # Используем walk() для обхода всех виджетов в дереве
-        for widget in self.table_layout.walk():
-            if isinstance(widget, CheckBox):
-                widget.active = True  # Отмечаем чекбокс
+        # Отмечаем все чекбоксы во всех страницах через checkbox_states
+        for file_path, _ in self.texts:
+            self.checkbox_states[file_path] = True
+        
+        # Обновляем виджеты на текущей странице
+        for checkbox in self.checkboxes_index.values():
+            checkbox.active = True
 
     def disable_all_checkboxes(self, instance):
         """
-        Убирает отметки всех чекбоксов в таблице.
+        Убирает отметки всех чекбоксов во ВСЕХ страницах пагинации.
+        Работает с глобальным состоянием чекбоксов.
         """
-        # Используем walk() для обхода всех виджетов в дереве
-        for widget in self.table_layout.walk():
-            if isinstance(widget, CheckBox):
-                widget.active = False  # Снимаем отметку с чекбокса
+        # Убираем отметки всех чекбоксов во всех страницах через checkbox_states
+        for file_path, _ in self.texts:
+            self.checkbox_states[file_path] = False
+        
+        # Обновляем виджеты на текущей странице
+        for checkbox in self.checkboxes_index.values():
+            checkbox.active = False
 
     #############################################################################
 
@@ -1388,20 +1613,28 @@ class DataLexApp(MDApp):
     def delete_selected_fragments(self, instance):
         """
         Удаляет фрагменты с выделенными чекбоксами.
+        Работает со всеми страницами пагинации через checkbox_states.
         """
-        # Собираем отмеченные идентификаторы
+        # Используем checkbox_states для получения отмеченных файлов из всех страниц
         selected_ids = []
-        for widget in self.table_layout.walk():
-            if isinstance(widget, CheckBox) and getattr(widget, 'active', False):
-                frag_id = getattr(widget, 'fragment_id', None)
-                if frag_id is not None:
-                    selected_ids.append(frag_id)
+        for file_path, is_active in self.checkbox_states.items():
+            if is_active:
+                selected_ids.append(file_path)
 
         if not selected_ids:
             return
 
         # Фильтруем self.texts
-        self.texts = [(k, t) for (k, t) in self.texts if k not in set(selected_ids)]
+        selected_ids_set = set(selected_ids)
+        self.texts = [(k, t) for (k, t) in self.texts if k not in selected_ids_set]
+
+        # Удаляем из кэша (Оптимизация 2)
+        for file_path in selected_ids:
+            if file_path in self.text_cache:
+                del self.text_cache[file_path]
+            # Удаляем из checkbox_states
+            if file_path in self.checkbox_states:
+                del self.checkbox_states[file_path]
 
         # Сброс текущего индекса, если он указывает на удалённый элемент
         if self.current_text_index is not None:
