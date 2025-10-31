@@ -891,21 +891,32 @@ class DataLexApp(MDApp):
         Выполняет фрагментацию текста в отдельном потоке и обновляет интерфейс.
         """
         from itertools import chain
+        
+        # Инициализируем прогресс-бар
+        total_texts = len(selected_texts)
+        Clock.schedule_once(lambda dt: setattr(self.progress_bar, 'max', total_texts), 0)
+        Clock.schedule_once(lambda dt: setattr(self.progress_bar, 'value', 0), 0)
 
         fragmented_data = []
         if size_split and not row_split:
             # Разбиение по размеру с учетом законченных предложений
-            # Возвращает список кортежей (text, is_successful, word_count)
-            fragmented_data = self.process_large_texts(selected_texts, target, tolerance)
+            # Обрабатываем каждый текст по отдельности с обновлением прогресса
+            for idx, text in enumerate(selected_texts, start=1):
+                fragments = self.split_by_size(text, target, tolerance)
+                fragmented_data.extend(fragments)
+                # Обновляем прогресс-бар
+                Clock.schedule_once(lambda dt, val=idx: setattr(self.progress_bar, 'value', val), 0)
         elif row_split:
             # Для разбиения по строкам просто разделяем каждый выбранный текст
             # Приоритет отдаем разбиению по строкам, если оба режима активны
-            for text in selected_texts:
+            for idx, text in enumerate(selected_texts, start=1):
                 for line in text.splitlines():
                     if line.strip():  # Игнорируем пустые строки
                         word_count = len(line.split())
                         # Все фрагменты помечаются как успешные при разбиении по строкам
                         fragmented_data.append((line.strip(), True, word_count))
+                # Обновляем прогресс-бар после каждого файла
+                Clock.schedule_once(lambda dt, val=idx: setattr(self.progress_bar, 'value', val), 0)
 
         # Переход обратно в основной поток для обновления интерфейса
         Clock.schedule_once(lambda dt: self._update_ui_after_fragmentation(fragmented_data, selected_ids))
@@ -956,6 +967,9 @@ class DataLexApp(MDApp):
         
         # Перерисовываем таблицу из обновлённого self.texts
         self.render_table_from_texts()
+        
+        # Сбрасываем прогресс-бар
+        self.progress_bar.value = 0
 
     def get_text_from_area_or_fragments(self):
         """
@@ -1095,74 +1109,110 @@ class DataLexApp(MDApp):
         """
         if popup:  # Проверка на None перед вызовом dismiss
             popup.dismiss()  # Закрываем попап
-        self.texts = []  # Сброс списка текстов
-        self.current_text_index = None  # Сброс выбранного элемента
-        self.current_selected_button = None  # Сброс выбранной кнопки
-        self.table_layout.clear_widgets()  # Очищаем таблицу
-
-        # Создание ScrollView для таблицы
-        scroll_view = ScrollView(size_hint=(1, 1))  # ScrollView на всю ширину и высоту
-        scroll_content = GridLayout(cols=4, size_hint_y=None)  # Сеточный лейаут для таблицы
-        scroll_content.bind(minimum_height=scroll_content.setter('height'))  # Автоматическая настройка высоты контента
-
-        # Заголовки таблицы
-        headers = ["##", "Фрагмент", "Слов", "Выбрать"]
-        for header in headers:
-            scroll_content.add_widget(BorderedCell(Label(text=header, size_hint_y=None, height=20, font_size="12sp")))
-
-        # Логируем начало загрузки
-        self.logger.info("Начинаем загрузку файлов.")
-
+        
         # Инициализируем прогрессбар
         total_files = len(file_paths)
         self.progress_bar.max = total_files
         self.progress_bar.value = 0
-
-        # Добавляем строки таблицы
+        
+        # Запускаем загрузку в отдельном потоке
+        Thread(
+            target=self._load_files_thread,
+            args=(file_paths,),
+            daemon=True
+        ).start()
+    
+    def _load_files_thread(self, file_paths):
+        """Загружает файлы в отдельном потоке"""
+        # Сброс данных
+        self.texts = []
+        self.current_text_index = None
+        self.current_selected_button = None
+        
+        # Логируем начало загрузки
+        self.logger.info("Начинаем загрузку файлов.")
+        
+        loaded_data = []
+        
+        # Загружаем файлы
         for i, file_path in enumerate(file_paths, start=1):
             try:
                 with open(file_path, 'r', encoding='utf-8') as file:
-                    text = file.read().strip()  # Убираем лишние пробелы
-                    self.texts.append((file_path, text))  # Добавляем текст в список
-
-                    # Логируем успешную загрузку текста
+                    text = file.read().strip()
+                    
+                    # Логируем успешную загрузку
                     self.logger.debug(f"Файл загружен: {file_path}, текст длиной {len(text)} символов.")
-
+                    
                     words_count = len(text.split())
-
-                    # Генерация имени файла для отображения
-                    fragment = os.path.basename(file_path)  # Получаем только имя файла без пути
-                    fragment = self.shorten_filename(fragment)  # Сокращаем длинное имя
-
-                    # Используем partial для передачи правильного индекса в on_release
-                    button = Button(text=str(i), size_hint_y=None, height=20)
-                    button.background_color = (1, 1, 1, 1)  # Белый цвет по умолчанию
-                    button.bind(on_release=partial(self.display_text, i - 1))  # Передаем индекс
-
-                    # Чекбокс для выбора
-                    checkbox = CheckBox(size_hint_y=None, height=20)
-                    checkbox.fragment_id = file_path  # Присваиваем уникальный идентификатор для файла
-
-                    # Добавляем элементы в таблицу
-                    scroll_content.add_widget(BorderedCell(button))
-                    scroll_content.add_widget(BorderedCell(Label(text=fragment, size_hint_y=None, height=20, font_size="10sp")))
-                    scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20, font_size="10sp")))
-                    scroll_content.add_widget(BorderedCell(checkbox))
-
+                    fragment = os.path.basename(file_path)
+                    fragment = self.shorten_filename(fragment)
+                    
+                    loaded_data.append({
+                        'file_path': file_path,
+                        'text': text,
+                        'fragment': fragment,
+                        'words_count': words_count,
+                        'index': i
+                    })
+                    
             except Exception as e:
-                # Логируем ошибку при загрузке файла
                 self.logger.error(f"Ошибка при загрузке файла {file_path}: {e}")
-                self.text_area.text = f"Ошибка при загрузке файла {file_path}: {e}"
-
-            # Обновляем прогрессбар после обработки каждого файла
-            self.progress_bar.value += 1
-
+            
+            # Обновляем прогрессбар через главный поток
+            Clock.schedule_once(lambda dt, val=i: setattr(self.progress_bar, 'value', val), 0)
+        
+        # Обновляем UI в главном потоке
+        Clock.schedule_once(lambda dt: self._update_table_after_load(loaded_data), 0)
+    
+    def _update_table_after_load(self, loaded_data):
+        """Обновляет таблицу после загрузки файлов (вызывается в главном потоке)"""
+        # Очищаем таблицу
+        self.table_layout.clear_widgets()
+        
+        # Создание ScrollView для таблицы
+        scroll_view = ScrollView(size_hint=(1, 1))
+        scroll_content = GridLayout(cols=4, size_hint_y=None)
+        scroll_content.bind(minimum_height=scroll_content.setter('height'))
+        
+        # Заголовки таблицы
+        headers = ["##", "Фрагмент", "Слов", "Выбрать"]
+        for header in headers:
+            scroll_content.add_widget(BorderedCell(Label(text=header, size_hint_y=None, height=20, font_size="12sp")))
+        
+        # Добавляем загруженные данные
+        for data in loaded_data:
+            file_path = data['file_path']
+            text = data['text']
+            fragment = data['fragment']
+            words_count = data['words_count']
+            i = data['index']
+            
+            # Сохраняем текст
+            self.texts.append((file_path, text))
+            
+            # Создаем UI элементы
+            button = Button(text=str(i), size_hint_y=None, height=20)
+            button.background_color = (1, 1, 1, 1)
+            button.bind(on_release=partial(self.display_text, i - 1))
+            
+            checkbox = CheckBox(size_hint_y=None, height=20)
+            checkbox.fragment_id = file_path
+            
+            # Добавляем элементы в таблицу
+            scroll_content.add_widget(BorderedCell(button))
+            scroll_content.add_widget(BorderedCell(Label(text=fragment, size_hint_y=None, height=20, font_size="10sp")))
+            scroll_content.add_widget(BorderedCell(Label(text=str(words_count), size_hint_y=None, height=20, font_size="10sp")))
+            scroll_content.add_widget(BorderedCell(checkbox))
+        
         # Добавляем таблицу в ScrollView
         scroll_view.add_widget(scroll_content)
         self.table_layout.add_widget(scroll_view)
-
-        # Логируем состояние словаря self.texts после загрузки
-        self.logger.debug(f"Состояние self.texts после загрузки: {self.texts}")
+        
+        # Логируем состояние
+        self.logger.debug(f"Состояние self.texts после загрузки: {len(self.texts)} файлов")
+        
+        # Сбрасываем прогресс-бар
+        self.progress_bar.value = 0
 
     def render_table_from_texts(self):
         """Полностью перерисовывает таблицу на основе текущего self.texts без чтения файлов заново."""
