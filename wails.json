@@ -1,0 +1,16 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "DataLex",
+  "outputfilename": "DataLex",
+  "frontend": {
+    "dir": "./frontend",
+    "install": "npm install",
+    "build": "npm run build",
+    "dev": "vite"
+  },
+  "autorun": false,
+  "runNonNativeBuildHooks": false,
+  "crossCompiled": false,
+  "garbleargs": ""
+}
+
