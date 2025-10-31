@@ -776,12 +776,18 @@ class DataLexApp(MDApp):
         tolerance = int(tolerance)
 
         # Получаем текст из text_area или из загруженных файлов
-        selected_texts = self.get_text_from_area_or_fragments()
-        print(f"Выбранные тексты: {selected_texts}")
+        selected_texts, selected_ids = self.get_text_from_area_or_fragments()
+        print(f"Выбранные тексты: {len(selected_texts)} шт.")
+        print(f"Выбранные IDs: {selected_ids}")
 
         if not selected_texts:
             print("Не выбран текст для разбиения")
             return
+
+        # Закрываем диалог фрагментатора
+        if self.dialog:
+            self.dialog.dismiss()
+            self.dialog = None
 
         # Отображаем прелоадер
         self.show_preloader()
@@ -789,91 +795,170 @@ class DataLexApp(MDApp):
         # Запускаем вычисления в потоке
         Thread(
             target=self._fragment_texts_in_thread,
-            args=(selected_texts, size_split, row_split, target, tolerance),
+            args=(selected_texts, selected_ids, size_split, row_split, target, tolerance),
             daemon=True
         ).start()
-        self.dialog = None  # Обнуляем ссылку на диалог
 
-    def split_by_size(self, text_iterable, target, tolerance):
-        if not text_iterable:
-            return
+    def split_by_size(self, text, target, tolerance):
+        """
+        Разбивает текст на фрагменты по законченным предложениям.
+        :param text: Исходный текст
+        :param target: Целевое количество слов
+        :param tolerance: Допуск (минимум слов)
+        :return: Список кортежей (fragment_text, is_successful)
+        """
+        if not text:
+            return []
+        
+        # Разбиваем текст на предложения (по точке, вопросительному и восклицательному знаку)
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        
+        fragments = []
         buffer = []
-        for word in text_iterable:
-            buffer.append(word)
-            if len(buffer) >= target:
-                yield " ".join(buffer)
-                buffer = []
-        if buffer and len(buffer) >= tolerance:
-            yield " ".join(buffer)
+        buffer_word_count = 0
+        
+        min_words = target - tolerance
+        max_words = target + tolerance
+        
+        for sentence in sentences:
+            sentence_words = len(sentence.split())
+            
+            # Если добавление предложения не превысит максимум, добавляем в буфер
+            if buffer_word_count + sentence_words <= max_words:
+                buffer.append(sentence)
+                buffer_word_count += sentence_words
+            else:
+                # Если буфер достаточно полон, сохраняем фрагмент
+                if buffer:
+                    fragment_text = ' '.join(buffer)
+                    is_successful = min_words <= buffer_word_count <= max_words
+                    fragments.append((fragment_text, is_successful, buffer_word_count))
+                
+                # Начинаем новый фрагмент с текущего предложения
+                buffer = [sentence]
+                buffer_word_count = sentence_words
+        
+        # Добавляем последний фрагмент, если он не пустой
+        if buffer:
+            fragment_text = ' '.join(buffer)
+            is_successful = min_words <= buffer_word_count <= max_words
+            fragments.append((fragment_text, is_successful, buffer_word_count))
+        
+        return fragments
 
     def process_large_texts(self, selected_texts, target, tolerance, max_workers=1500):
         """
         Параллельная фрагментация больших текстов.
         :param selected_texts: Список текстов для фрагментации.
         :param target: Желаемое количество слов в одном фрагменте.
-        :param tolerance: Минимальное количество слов для включения фрагмента в результат.
+        :param tolerance: Допуск (+/-).
         :param max_workers: Количество потоков для параллельной обработки.
-        :return: Список фрагментированных текстов.
+        :return: Список кортежей (fragment_text, is_successful, word_count).
         """
 
         def fragment_text(text):
             # Проверяем длину текста и ограничиваем обработку
             if len(text.split()) > target * 10:  # Примерное ограничение
                 print("Обрабатывается большой текст...")
-            return list(self.split_by_size(text.split(), target, tolerance))
+            return self.split_by_size(text, target, tolerance)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             results = executor.map(fragment_text, selected_texts)
         return list(chain.from_iterable(results))  # Сразу объединяем фрагменты
 
-    def _fragment_texts_in_thread(self, selected_texts, size_split, row_split, target, tolerance):
+    def _fragment_texts_in_thread(self, selected_texts, selected_ids, size_split, row_split, target, tolerance):
         """
         Выполняет фрагментацию текста в отдельном потоке и обновляет интерфейс.
         """
         from itertools import chain
 
-        fragmented_texts = []
+        fragmented_data = []
         if size_split:
-            fragmented_texts = self.process_large_texts(selected_texts, target, tolerance)
+            # Возвращает список кортежей (text, is_successful, word_count)
+            fragmented_data = self.process_large_texts(selected_texts, target, tolerance)
         elif row_split:
-            fragmented_texts = list(chain.from_iterable(text.splitlines() for text in selected_texts))
+            # Для разбиения по строкам просто разделяем
+            for text in selected_texts:
+                for line in text.splitlines():
+                    if line.strip():
+                        word_count = len(line.split())
+                        fragmented_data.append((line, True, word_count))
 
         # Переход обратно в основной поток для обновления интерфейса
-        Clock.schedule_once(lambda dt: self._update_ui_after_fragmentation(fragmented_texts))
+        Clock.schedule_once(lambda dt: self._update_ui_after_fragmentation(fragmented_data, selected_ids))
 
-    def _update_ui_after_fragmentation(self, fragmented_texts):
+    def _update_ui_after_fragmentation(self, fragmented_data, selected_ids):
         """
         Обновляет интерфейс после фрагментации текста.
+        :param fragmented_data: Список кортежей (text, is_successful, word_count)
+        :param selected_ids: Список ID исходных файлов, которые были разбиты
         """
         # Скрываем прелоадер
         self.hide_preloader()
+        
+        # Закрываем диалог фрагментатора, если он ещё открыт
+        if self.dialog:
+            self.dialog.dismiss()
+            self.dialog = None
 
-        # Подсчитываем количество фрагментов
-        num_fragments = len(fragmented_texts)
+        # Подсчитываем статистику
+        total_fragments = len(fragmented_data)
+        failed_fragments = sum(1 for _, is_successful, _ in fragmented_data if not is_successful)
+        successful_fragments = total_fragments - failed_fragments
 
-        # Показать всплывающее окно с информацией
+        # Показать всплывающее окно со статистикой
+        stats_text = f"Создано фрагментов\n\nвсего: {total_fragments}\n\nнеудачных: {failed_fragments}"
+        
         info_popup = Popup(
             title="Обработка завершена",
-            content=Label(text=f"Фрагментация завершена.\nКоличество фрагментов: {num_fragments}"),
-            size_hint=(0.5, 0.5),
+            content=Label(text=stats_text, font_size="16sp"),
+            size_hint=(0.4, 0.4),
             auto_dismiss=True
         )
         info_popup.open()
 
-        # Здесь можно обновить интерфейс с результатами
-        self.update_table_and_text_area(fragmented_texts)
+        # Удаляем исходные файлы из self.texts
+        selected_ids_set = set(selected_ids)
+        self.texts = [(file_path, text) for file_path, text in self.texts if file_path not in selected_ids_set]
+        
+        # Добавляем новые фрагменты в self.texts
+        for idx, (fragment_text, is_successful, word_count) in enumerate(fragmented_data, start=1):
+            # Генерируем уникальный ключ для фрагмента
+            fragment_key = f"fragment_{len(self.texts) + 1}_{idx}"
+            self.texts.append((fragment_key, fragment_text))
+        
+        # Сбрасываем текущий выбранный индекс
+        self.current_text_index = None
+        self.current_selected_button = None
+        
+        # Перерисовываем таблицу из обновлённого self.texts
+        self.render_table_from_texts()
 
     def get_text_from_area_or_fragments(self):
-        if self.text_area.text.strip() != 'Нет текста':  # Дополнительная проверка
-            print(f"Текст в text_area: '{self.text_area.text}'")
-            return [self.text_area.text]
-        else:
-            if self.texts:
-                selected_texts = [text for _, text in self.texts]
-                print(f"Тексты из загруженных файлов: {selected_texts}")
-                return selected_texts
-            print("Нет текста для разбиения.")
-            return []
+        """
+        Возвращает тексты и IDs только из файлов с отмеченными чекбоксами.
+        :return: (selected_texts, selected_ids)
+        """
+        # Собираем идентификаторы файлов с отмеченными чекбоксами
+        selected_ids = set()
+        for widget in self.table_layout.walk():
+            if isinstance(widget, CheckBox) and widget.active:
+                frag_id = getattr(widget, 'fragment_id', None)
+                if frag_id is not None:
+                    selected_ids.add(frag_id)
+        
+        if not selected_ids:
+            print("Нет отмеченных файлов для фрагментации.")
+            return [], []
+        
+        # Возвращаем тексты только из отмеченных файлов
+        selected_texts = []
+        for file_path, text in self.texts:
+            if file_path in selected_ids:
+                selected_texts.append(text)
+        
+        print(f"Выбрано {len(selected_texts)} текстов для фрагментации")
+        return selected_texts, list(selected_ids)
 
     def get_selected_texts(self):
         selected_texts = []
